@@ -68,7 +68,13 @@ def process_channels(
             df = loader(io.BytesIO(raw))
             dfs.append(df)
         except Exception as exc:
-            st.warning(f"⚠️ Could not process {name}: {exc}")
+            # Show actual column names to help diagnose mismatches
+            try:
+                peek = pd.read_csv(io.BytesIO(raw), nrows=0)
+                cols = list(peek.columns)
+            except Exception:
+                cols = ["could not read columns"]
+            st.warning(f"⚠️ Could not process {name}: {exc}  |  Columns found: {cols}")
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 

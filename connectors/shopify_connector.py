@@ -9,8 +9,12 @@ def _read_file(source, **kwargs):
     if hasattr(source, "read"):
         raw  = source.read()
         text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
-        return pd.read_csv(io.StringIO(text), **kwargs)
-    return pd.read_csv(source, encoding="utf-8-sig", **kwargs)
+        df = pd.read_csv(io.StringIO(text), **kwargs)
+        df.columns = df.columns.str.strip().str.lstrip("﻿")
+        return df
+    df = pd.read_csv(source, encoding="utf-8-sig", **kwargs)
+    df.columns = df.columns.str.strip().str.lstrip("﻿")
+    return df
 
 
 def load_daily(source) -> pd.DataFrame:
