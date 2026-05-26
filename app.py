@@ -331,10 +331,10 @@ with st.sidebar:
     st.divider()
     st.markdown("### Upload Data")
 
-    shopify_file = st.file_uploader("Shopify CSV",  type="csv", key="shopify")
-    amazon_file  = st.file_uploader("Amazon CSV",   type="csv", key="amazon")
-    myntra_file  = st.file_uploader("Myntra CSV",   type="csv", key="myntra")
-    fynd_file    = st.file_uploader("Fynd CSV",     type="csv", key="fynd")
+    shopify_file = st.file_uploader("TPP Website CSV", type="csv", key="shopify")
+    amazon_file  = st.file_uploader("Amazon CSV",      type="csv", key="amazon")
+    myntra_file  = st.file_uploader("Myntra CSV",      type="csv", key="myntra")
+    fynd_file    = st.file_uploader("Retail CSV",      type="csv", key="fynd")
 
     st.divider()
     st.markdown("### Gross Margin *(optional)*")
@@ -358,10 +358,10 @@ if not files_ready:
     col1, col2 = st.columns(2)
     with col1:
         st.info("**Required files**\n\n"
-                "\U0001f4c2 Shopify CSV\n\n"
+                "\U0001f4c2 TPP Website CSV\n\n"
                 "\U0001f4c2 Amazon CSV\n\n"
                 "\U0001f4c2 Myntra CSV\n\n"
-                "\U0001f4c2 Fynd CSV")
+                "\U0001f4c2 Retail CSV")
     with col2:
         st.success("**Optional**\n\n"
                    "\U0001f4c2 COGS CSV — enables Gross Margin %\n\n"
