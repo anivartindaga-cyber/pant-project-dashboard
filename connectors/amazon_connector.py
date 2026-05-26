@@ -6,19 +6,21 @@ CHANNEL = "Amazon"
 
 def _read_csv(source):
     """Read Amazon CSV, auto-detecting the header row that starts with 'date/time'.
-    Works with both file paths and file-like objects (e.g. BytesIO from st.file_uploader)."""
+    Uses utf-8-sig to strip the Windows BOM character if present."""
     if hasattr(source, "read"):
         raw = source.read()
-        text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        # utf-8-sig automatically strips the BOM (﻿) added by Excel/Windows
+        text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
     else:
-        with open(source, encoding="utf-8", errors="replace") as f:
+        with open(source, encoding="utf-8-sig", errors="replace") as f:
             text = f.read()
 
     lines = text.splitlines()
 
-    # Find the actual header row — works regardless of how many metadata rows Amazon adds
+    # Find the actual header row (strip any remaining BOM just in case)
     header_idx = next(
-        (i for i, line in enumerate(lines) if line.lower().startswith("date/time")),
+        (i for i, line in enumerate(lines)
+         if line.lstrip("﻿").lower().startswith("date/time")),
         None,
     )
     if header_idx is None:
