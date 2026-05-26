@@ -230,6 +230,38 @@ def fmt_inr(value: float) -> str:
 # CACHED DATA PROCESSING
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Standard output columns produced by every loader
+_OUT_COLS  = ["channel", "date", "sku", "orders", "gross_sales",
+              "discounts", "returns", "net_sales", "units_sold"]
+_OUT_SET   = set(_OUT_COLS) - {"date"}   # date may be named differently
+
+
+def _try_passthrough(raw: bytes) -> Optional[pd.DataFrame]:
+    """
+    If the CSV is already in processed form (has our standard columns),
+    load it directly rather than pushing it through a raw-export parser.
+    Returns a DataFrame or None.
+    """
+    try:
+        peek = pd.read_csv(io.BytesIO(raw), nrows=0)
+        peek.columns = peek.columns.str.strip().str.lower()
+        if _OUT_SET.issubset(set(peek.columns)):
+            df = pd.read_csv(io.BytesIO(raw))
+            df.columns = df.columns.str.strip().str.lower()
+            # Handle date/month column
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            elif "month" in df.columns:
+                df["date"] = pd.to_datetime(df["month"], errors="coerce")
+                df = df.drop(columns=["month"])
+            else:
+                df["date"] = pd.Timestamp.today().normalize()
+            return df[_OUT_COLS]
+    except Exception:
+        pass
+    return None
+
+
 @st.cache_data(show_spinner="Processing data…")
 def process_channels(
     shopify_bytes: bytes,
@@ -243,8 +275,30 @@ def process_channels(
         ("Myntra",  load_myntra,  myntra_bytes),
         ("Fynd",    load_fynd,    fynd_bytes),
     ]
-    dfs = []
+    dfs        = []
+    seen_hashes: set = set()   # avoid loading the same file twice
+
     for name, loader, raw in loaders:
+        file_hash = hash(raw)
+
+        # ── Already-processed CSV? ──────────────────────────────────────────
+        pt = _try_passthrough(raw)
+        if pt is not None:
+            if file_hash not in seen_hashes:
+                seen_hashes.add(file_hash)
+                dfs.append(pt)
+                st.info(
+                    f"ℹ️ **{name}**: detected a pre-processed CSV — loaded directly. "
+                    "If you meant to upload the raw platform export, re-upload the "
+                    "original file downloaded from the platform."
+                )
+            continue
+
+        # ── Raw channel export ──────────────────────────────────────────────
+        if file_hash in seen_hashes:
+            continue
+        seen_hashes.add(file_hash)
+
         try:
             df = loader(io.BytesIO(raw))
             dfs.append(df)
@@ -257,6 +311,7 @@ def process_channels(
             st.warning(
                 f"⚠️ Could not process {name}: {exc}  |  Columns found: {cols}"
             )
+
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
