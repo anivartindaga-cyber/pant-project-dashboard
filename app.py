@@ -1,24 +1,14 @@
 import io
-import sys
-from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-ROOT = Path(__file__).parent
-sys.path.insert(0, str(ROOT))
-
-from connectors.shopify_connector import load_daily as load_shopify
-from connectors.amazon_connector  import load_daily as load_amazon
-from connectors.myntra_connector  import load_daily as load_myntra
-from connectors.fynd_connector    import load_daily as load_fynd
-
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="The Pant Project — Sales Dashboard",
-    page_icon="👖",
+    page_icon="\U0001f456",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -37,7 +27,195 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CHANNEL CONNECTORS  (inlined — no separate package required)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip whitespace and BOM from column names."""
+    df.columns = df.columns.str.strip().str.lstrip("﻿")
+    return df
+
+
+def _read_csv_generic(source, **kwargs) -> pd.DataFrame:
+    if hasattr(source, "read"):
+        raw  = source.read()
+        text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
+        df   = pd.read_csv(io.StringIO(text), **kwargs)
+    else:
+        df = pd.read_csv(source, encoding="utf-8-sig", **kwargs)
+    return _clean_cols(df)
+
+
+# ── Shopify ───────────────────────────────────────────────────────────────────
+def load_shopify(source) -> pd.DataFrame:
+    df = _read_csv_generic(source)
+    df["date"] = pd.to_datetime(df["Day"], format="%m/%d/%Y")
+    result = (
+        df.groupby(["date", "Product variant SKU"])
+        .agg(
+            orders=("Orders", "sum"),
+            gross_sales=("Gross sales", "sum"),
+            discounts=("Discounts", "sum"),
+            returns=("Returns", "sum"),
+            net_sales=("Net sales", "sum"),
+            units_sold=("Net items sold", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"Product variant SKU": "sku"})
+    )
+    result["channel"] = "Shopify"
+    return result[["channel", "date", "sku", "orders", "gross_sales",
+                   "discounts", "returns", "net_sales", "units_sold"]]
+
+
+# ── Amazon ────────────────────────────────────────────────────────────────────
+def _read_amazon_csv(source) -> pd.DataFrame:
+    if hasattr(source, "read"):
+        raw  = source.read()
+        text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
+    else:
+        with open(source, encoding="utf-8-sig", errors="replace") as f:
+            text = f.read()
+
+    lines = text.splitlines()
+    header_idx = next(
+        (i for i, line in enumerate(lines)
+         if line.lstrip("﻿").lower().startswith("date/time")),
+        None,
+    )
+    if header_idx is None:
+        raise ValueError("Could not find 'date/time' header row in Amazon CSV.")
+    return _clean_cols(
+        pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), thousands=",")
+    )
+
+
+def load_amazon(source) -> pd.DataFrame:
+    df = _read_amazon_csv(source)
+
+    df["date"] = pd.to_datetime(
+        df["date/time"].astype(str).str.extract(r"(\d{1,2} \w{3} \d{4})")[0],
+        format="%d %b %Y",
+        errors="coerce",
+    )
+
+    for col in ["product sales", "total"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).fillna(0)
+
+    df = df[df["date"].notna() & df["type"].isin(["Order", "Refund"])].copy()
+
+    key     = ["date", "Sku"]
+    orders  = df[df["type"] == "Order"]
+    refunds = df[df["type"] == "Refund"]
+
+    agg_orders = (
+        orders.groupby(key)
+        .agg(
+            orders=("quantity", "sum"),
+            units_sold=("quantity", "sum"),
+            gross_sales=("product sales", "sum"),
+            net_sales=("total", "sum"),
+        )
+        .reset_index()
+    )
+    agg_refunds = (
+        refunds.groupby(key)
+        .agg(returns=("product sales", "sum"))
+        .reset_index()
+    )
+
+    result = agg_orders.merge(agg_refunds, on=key, how="left")
+    result["returns"]   = result["returns"].fillna(0)
+    result["discounts"] = 0.0
+
+    result = result.rename(columns={"Sku": "sku"})
+    result["channel"] = "Amazon"
+    return result[["channel", "date", "sku", "orders", "gross_sales",
+                   "discounts", "returns", "net_sales", "units_sold"]]
+
+
+# ── Myntra ────────────────────────────────────────────────────────────────────
+_MYNTRA_DELIVERED = {"C", "D"}
+_MYNTRA_RETURNS   = {"RTO", "RTF"}
+
+
+def load_myntra(source) -> pd.DataFrame:
+    df = _read_csv_generic(source, low_memory=False)
+
+    df["_date"] = pd.NaT
+    for col in ["return creation date", "rto creation date",
+                "delivered on", "cancelled on", "created on"]:
+        if col in df.columns:
+            df["_date"] = df["_date"].combine_first(
+                pd.to_datetime(df[col], errors="coerce")
+            )
+    df["date"] = df["_date"].dt.normalize()
+
+    key      = ["date", "seller sku code"]
+    sales_df = df[df["order status"].isin(_MYNTRA_DELIVERED)].copy()
+    ret_df   = df[df["order status"].isin(_MYNTRA_RETURNS)].copy()
+
+    agg_sales = (
+        sales_df.groupby(key)
+        .agg(
+            orders=("order release id", "count"),
+            gross_sales=("final amount", "sum"),
+            discounts=("discount", "sum"),
+            net_sales=("seller price", "sum"),
+            units_sold=("order release id", "count"),
+        )
+        .reset_index()
+    )
+    agg_sales["discounts"] = -agg_sales["discounts"]
+
+    agg_returns = (
+        ret_df.groupby(key)
+        .agg(returns=("seller price", "sum"))
+        .reset_index()
+    )
+    agg_returns["returns"] = -agg_returns["returns"]
+
+    result = agg_sales.merge(agg_returns, on=key, how="left")
+    result["returns"] = result["returns"].fillna(0)
+
+    result = result.rename(columns={"seller sku code": "sku"})
+    result["channel"] = "Myntra"
+    return result[["channel", "date", "sku", "orders", "gross_sales",
+                   "discounts", "returns", "net_sales", "units_sold"]]
+
+
+# ── Fynd ──────────────────────────────────────────────────────────────────────
+def load_fynd(source) -> pd.DataFrame:
+    df = _read_csv_generic(source)
+    df["date"] = pd.to_datetime(df["Day"], format="%Y-%m-%d")
+
+    result = (
+        df.groupby(["date", "Product variant SKU"])
+        .agg(
+            orders=("Orders", "sum"),
+            gross_sales=("Gross sales", "sum"),
+            discounts=("Discounts", "sum"),
+            returns=("Returns", "sum"),
+            net_sales=("Net sales", "sum"),
+            units_sold=("Net items sold", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"Product variant SKU": "sku"})
+    )
+    result["channel"] = "Fynd"
+    return result[["channel", "date", "sku", "orders", "gross_sales",
+                   "discounts", "returns", "net_sales", "units_sold"]]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
 def fmt_inr(value: float) -> str:
     v    = abs(value)
     sign = "-" if value < 0 else ""
@@ -48,7 +226,10 @@ def fmt_inr(value: float) -> str:
     return f"{sign}₹{v:,.0f}"
 
 
-# ── Cached data processing ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CACHED DATA PROCESSING
+# ══════════════════════════════════════════════════════════════════════════════
+
 @st.cache_data(show_spinner="Processing data…")
 def process_channels(
     shopify_bytes: bytes,
@@ -68,13 +249,14 @@ def process_channels(
             df = loader(io.BytesIO(raw))
             dfs.append(df)
         except Exception as exc:
-            # Show actual column names to help diagnose mismatches
             try:
                 peek = pd.read_csv(io.BytesIO(raw), nrows=0)
                 cols = list(peek.columns)
             except Exception:
                 cols = ["could not read columns"]
-            st.warning(f"⚠️ Could not process {name}: {exc}  |  Columns found: {cols}")
+            st.warning(
+                f"⚠️ Could not process {name}: {exc}  |  Columns found: {cols}"
+            )
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
@@ -85,9 +267,12 @@ def process_cogs(cogs_bytes: bytes) -> Optional[pd.DataFrame]:
     return df[["sku", "cost_price"]]
 
 
-# ── Sidebar — file uploaders ───────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR — FILE UPLOADERS
+# ══════════════════════════════════════════════════════════════════════════════
+
 with st.sidebar:
-    st.markdown("## 👖 The Pant Project")
+    st.markdown("## \U0001f456 The Pant Project")
     st.divider()
     st.markdown("### Upload Data")
 
@@ -101,11 +286,14 @@ with st.sidebar:
     cogs_file = st.file_uploader("COGS CSV", type="csv", key="cogs",
                                   help="CSV with columns: sku, cost_price")
 
-# ── Upload prompt ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# UPLOAD PROMPT
+# ══════════════════════════════════════════════════════════════════════════════
+
 files_ready = all([shopify_file, amazon_file, myntra_file, fynd_file])
 
 if not files_ready:
-    st.title("👖 The Pant Project — Sales Dashboard")
+    st.title("\U0001f456 The Pant Project — Sales Dashboard")
     st.markdown("### Upload your CSV files to get started")
     st.markdown(
         "Use the **sidebar on the left** to upload your four channel exports. "
@@ -115,13 +303,13 @@ if not files_ready:
     col1, col2 = st.columns(2)
     with col1:
         st.info("**Required files**\n\n"
-                "📂 Shopify CSV\n\n"
-                "📂 Amazon CSV\n\n"
-                "📂 Myntra CSV\n\n"
-                "📂 Fynd CSV")
+                "\U0001f4c2 Shopify CSV\n\n"
+                "\U0001f4c2 Amazon CSV\n\n"
+                "\U0001f4c2 Myntra CSV\n\n"
+                "\U0001f4c2 Fynd CSV")
     with col2:
         st.success("**Optional**\n\n"
-                   "📂 COGS CSV — enables Gross Margin %\n\n"
+                   "\U0001f4c2 COGS CSV — enables Gross Margin %\n\n"
                    "Format: two columns\n"
                    "`sku` and `cost_price`")
 
@@ -130,7 +318,10 @@ if not files_ready:
         st.progress(uploaded / 4, text=f"{uploaded} of 4 files uploaded")
     st.stop()
 
-# ── Process uploaded files ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# PROCESS UPLOADED FILES
+# ══════════════════════════════════════════════════════════════════════════════
+
 df_raw = process_channels(
     shopify_file.read(), amazon_file.read(),
     myntra_file.read(),  fynd_file.read(),
@@ -145,7 +336,10 @@ if df_raw.empty:
 
 df_raw["date"] = pd.to_datetime(df_raw["date"])
 
-# ── Sidebar — filters (shown after upload) ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR — FILTERS
+# ══════════════════════════════════════════════════════════════════════════════
+
 with st.sidebar:
     st.divider()
     st.markdown("### Filters")
@@ -166,9 +360,12 @@ with st.sidebar:
     st.divider()
     st.caption(f"Data: {min_d.strftime('%d %b %Y')} → {max_d.strftime('%d %b %Y')}")
     if not has_cogs:
-        st.info("💡 Upload `cogs.csv` above to unlock **Gross Margin %**")
+        st.info("\U0001f4a1 Upload `cogs.csv` above to unlock **Gross Margin %**")
 
-# ── Apply filters ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# APPLY FILTERS
+# ══════════════════════════════════════════════════════════════════════════════
+
 if len(date_range) == 2:
     s, e = date_range
     df = df_raw[
@@ -183,14 +380,20 @@ if df.empty:
     st.warning("No data for the selected filters.")
     st.stop()
 
-# ── Merge COGS ─────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# MERGE COGS
+# ══════════════════════════════════════════════════════════════════════════════
+
 if has_cogs:
     df = df.merge(cogs_df, on="sku", how="left")
     df["total_cogs"] = df["units_sold"] * df["cost_price"].fillna(0)
 else:
     df["total_cogs"] = 0.0
 
-# ── KPI calculations ───────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# KPI CALCULATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
 gross_rev    = df["gross_sales"].sum()
 net_rev      = df["net_sales"].sum()
 gross_profit = net_rev - df["total_cogs"].sum()
@@ -202,11 +405,14 @@ total_orders = df["orders"].sum()
 return_rate  = total_ret / gross_rev * 100 if gross_rev else 0
 aov          = net_rev / total_orders if total_orders else 0
 
-# ── Header ─────────────────────────────────────────────────────────────────────
-st.title("👖 The Pant Project — Sales Dashboard")
+# ══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.title("\U0001f456 The Pant Project — Sales Dashboard")
 if len(date_range) == 2:
     st.caption(
-        f"📅 **{date_range[0].strftime('%d %b %Y')}** → **{date_range[1].strftime('%d %b %Y')}**"
+        f"\U0001f4c5 **{date_range[0].strftime('%d %b %Y')}** → **{date_range[1].strftime('%d %b %Y')}**"
         f"  ·  Channels: {', '.join(channels)}"
     )
 
@@ -228,7 +434,7 @@ c8.metric("Avg Order Value", fmt_inr(aov))
 
 st.divider()
 
-# ── Revenue trend + channel split ──────────────────────────────────────────────
+# ── Revenue trend + channel split ─────────────────────────────────────────────
 col_l, col_r = st.columns([3, 2])
 
 with col_l:
@@ -280,7 +486,9 @@ with col_b:
             .agg(net_s=("net_sales", "sum"), cogs=("total_cogs", "sum"))
             .reset_index()
         )
-        ch_gm["gm_pct"] = ((ch_gm["net_s"] - ch_gm["cogs"]) / ch_gm["net_s"] * 100).round(1)
+        ch_gm["gm_pct"] = (
+            (ch_gm["net_s"] - ch_gm["cogs"]) / ch_gm["net_s"] * 100
+        ).round(1)
         fig_gm = px.bar(
             ch_gm, x="channel", y="gm_pct", color="channel",
             title="Gross Margin % by Channel",
@@ -293,7 +501,9 @@ with col_b:
         st.plotly_chart(fig_gm, use_container_width=True)
     else:
         ret_ch = df.groupby("channel")[["gross_sales", "returns"]].sum().reset_index()
-        ret_ch["return_rate"] = (abs(ret_ch["returns"]) / ret_ch["gross_sales"] * 100).round(1)
+        ret_ch["return_rate"] = (
+            abs(ret_ch["returns"]) / ret_ch["gross_sales"] * 100
+        ).round(1)
         fig_ret = px.bar(
             ret_ch, x="channel", y="return_rate", color="channel",
             title="Return Rate % by Channel",
@@ -307,7 +517,7 @@ with col_b:
 
 st.divider()
 
-# ── SKU Analysis ───────────────────────────────────────────────────────────────
+# ── Top SKUs ──────────────────────────────────────────────────────────────────
 st.markdown("#### Top SKUs")
 tab_rev, tab_units = st.tabs(["By Net Revenue", "By Units Sold"])
 
@@ -344,7 +554,7 @@ with tab_units:
 st.divider()
 
 # ── Raw data table ─────────────────────────────────────────────────────────────
-with st.expander("📋 View & Download Raw Data"):
+with st.expander("\U0001f4cb View & Download Raw Data"):
     display_df = df.drop(columns=["total_cogs", "cost_price"], errors="ignore")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
     st.download_button(
