@@ -391,6 +391,12 @@ if df_raw.empty:
 
 df_raw["date"] = pd.to_datetime(df_raw["date"])
 
+# Normalise legacy channel names
+df_raw["channel"] = df_raw["channel"].replace({
+    "Shopify": "TPP Website",
+    "Fynd":    "Retail",
+})
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR — FILTERS
 # ══════════════════════════════════════════════════════════════════════════════
