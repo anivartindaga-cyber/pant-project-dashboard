@@ -1,4 +1,5 @@
 import io
+import re
 from typing import Optional
 
 import pandas as pd
@@ -315,11 +316,20 @@ def process_channels(
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
+def _base_style(sku: str) -> str:
+    """Strip trailing size suffix: -32, _34, -XL, _XXL, -L, _S etc."""
+    return re.sub(r'[-_](\d{2,3}|XXL|XL|XS|XXXL|[LMSX])$', '', str(sku).strip())
+
+
 @st.cache_data(show_spinner=False)
 def process_cogs(cogs_bytes: bytes) -> Optional[pd.DataFrame]:
     df = pd.read_csv(io.BytesIO(cogs_bytes))
     df.columns = df.columns.str.lower().str.strip()
-    return df[["sku", "cost_price"]]
+    if "style_code" in df.columns:
+        df = df.rename(columns={"style_code": "sku"})
+    df = df[["sku", "cost_price"]].copy()
+    df["cost_price"] = pd.to_numeric(df["cost_price"], errors="coerce")
+    return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -446,7 +456,20 @@ if df.empty:
 # ══════════════════════════════════════════════════════════════════════════════
 
 if has_cogs:
+    # 1) Exact SKU match
     df = df.merge(cogs_df, on="sku", how="left")
+
+    # 2) For unmatched rows, try style-code match (strip size suffix)
+    no_match = df["cost_price"].isna()
+    if no_match.any():
+        style_map = dict(zip(
+            cogs_df["sku"].apply(_base_style),
+            cogs_df["cost_price"]
+        ))
+        df.loc[no_match, "cost_price"] = (
+            df.loc[no_match, "sku"].apply(_base_style).map(style_map)
+        )
+
     df["total_cogs"] = df["units_sold"] * df["cost_price"].fillna(0)
 else:
     df["total_cogs"] = 0.0
