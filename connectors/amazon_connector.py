@@ -8,9 +8,11 @@ def load_daily(source) -> pd.DataFrame:
     """source: a file path, file-like object, or BytesIO from st.file_uploader."""
     df = pd.read_csv(source, skiprows=SKIPROWS, thousands=",")
 
+    # Strip trailing timezone label then let pandas auto-detect the format.
+    # Specifying format="%d %b %Y %I:%M:%S %p" fails in pandas 2.x when the
+    # hour has no leading zero (e.g. "6:35:16 pm" instead of "06:35:16 pm").
     df["date"] = pd.to_datetime(
         df["date/time"].astype(str).str.replace(r"\s+UTC$", "", regex=True),
-        format="%d %b %Y %I:%M:%S %p",
         errors="coerce",
     ).dt.normalize()
 
