@@ -8,13 +8,26 @@ def load_daily(source) -> pd.DataFrame:
     """source: a file path, file-like object, or BytesIO from st.file_uploader."""
     df = pd.read_csv(source, skiprows=SKIPROWS, thousands=",")
 
-    # Strip trailing timezone label then let pandas auto-detect the format.
-    # Specifying format="%d %b %Y %I:%M:%S %p" fails in pandas 2.x when the
-    # hour has no leading zero (e.g. "6:35:16 pm" instead of "06:35:16 pm").
+    # Normalise date strings: strip timezone, uppercase am/pm, then parse.
+    # e.g. "30 Apr 2026 6:35:16 pm UTC" → "30 Apr 2026 6:35:16 PM"
+    clean = (
+        df["date/time"]
+        .astype(str)
+        .str.replace(r"\s+UTC$", "", regex=True)
+        .str.replace(r"\bam\b", "AM", regex=True)
+        .str.replace(r"\bpm\b", "PM", regex=True)
+    )
     df["date"] = pd.to_datetime(
-        df["date/time"].astype(str).str.replace(r"\s+UTC$", "", regex=True),
-        errors="coerce",
+        clean, format="%d %b %Y %I:%M:%S %p", errors="coerce"
     ).dt.normalize()
+
+    # Ensure money columns are numeric (CSV may contain "1,657.14" as strings)
+    for col in ["product sales", "total"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(",", "", regex=False),
+                errors="coerce",
+            ).fillna(0)
 
     df = df[df["date"].notna() & df["type"].isin(["Order", "Refund"])].copy()
 
