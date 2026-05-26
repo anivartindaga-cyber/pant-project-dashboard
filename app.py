@@ -64,7 +64,7 @@ def load_shopify(source) -> pd.DataFrame:
         .reset_index()
         .rename(columns={"Product variant SKU": "sku"})
     )
-    result["channel"] = "Shopify"
+    result["channel"] = "TPP Website"
     return result[["channel", "date", "sku", "orders", "gross_sales",
                    "discounts", "returns", "net_sales", "units_sold"]]
 
@@ -207,7 +207,7 @@ def load_fynd(source) -> pd.DataFrame:
         .reset_index()
         .rename(columns={"Product variant SKU": "sku"})
     )
-    result["channel"] = "Fynd"
+    result["channel"] = "Retail"
     return result[["channel", "date", "sku", "orders", "gross_sales",
                    "discounts", "returns", "net_sales", "units_sold"]]
 
