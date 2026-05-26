@@ -8,18 +8,13 @@ def load_daily(source) -> pd.DataFrame:
     """source: a file path, file-like object, or BytesIO from st.file_uploader."""
     df = pd.read_csv(source, skiprows=SKIPROWS, thousands=",")
 
-    # Normalise date strings: strip timezone and uppercase am/pm.
-    # Then use dateutil inference (no format string) which handles
-    # single-digit hours, varied spacing, etc.
-    # e.g. "30 Apr 2026 6:35:16 pm UTC" → "30 Apr 2026 6:35:16 PM"
-    clean = (
-        df["date/time"]
-        .astype(str)
-        .str.replace(r"\s+UTC$", "", regex=True)
-        .str.replace(r"\bam\b", "AM", regex=True)
-        .str.replace(r"\bpm\b", "PM", regex=True)
+    # Extract just the date portion "30 Apr 2026" from the full datetime string
+    # "30 Apr 2026 6:35:16 pm UTC" — avoids all time/AM-PM parsing issues.
+    df["date"] = pd.to_datetime(
+        df["date/time"].astype(str).str.extract(r"(\d{1,2} \w{3} \d{4})")[0],
+        format="%d %b %Y",
+        errors="coerce",
     )
-    df["date"] = pd.to_datetime(clean, errors="coerce").dt.normalize()
 
     # Ensure money columns are numeric (CSV may contain "1,657.14" as strings)
     for col in ["product sales", "total"]:
