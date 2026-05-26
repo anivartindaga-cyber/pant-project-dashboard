@@ -1,15 +1,13 @@
-from pathlib import Path
 import pandas as pd
 
 CHANNEL = "Fynd"
-CSV_PATH = Path(__file__).parent.parent / "data" / "fynd_export.csv"
 
 
-def load_daily() -> pd.DataFrame:
-    df = pd.read_csv(CSV_PATH)
+def load_daily(source) -> pd.DataFrame:
+    """source: a file path, file-like object, or BytesIO from st.file_uploader."""
+    df = pd.read_csv(source)
     df["date"] = pd.to_datetime(df["Day"], format="%Y-%m-%d")
 
-    # Fynd exports include "previous_period" columns — use current period only
     result = (
         df.groupby(["date", "Product variant SKU"])
         .agg(

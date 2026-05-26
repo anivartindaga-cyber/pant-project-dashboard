@@ -1,13 +1,12 @@
-from pathlib import Path
 import pandas as pd
 
 CHANNEL = "Amazon"
-CSV_PATH = Path(__file__).parent.parent / "data" / "amazon_export.csv"
 SKIPROWS = 14  # metadata rows before the actual header
 
 
-def load_daily() -> pd.DataFrame:
-    df = pd.read_csv(CSV_PATH, skiprows=SKIPROWS, thousands=",")
+def load_daily(source) -> pd.DataFrame:
+    """source: a file path, file-like object, or BytesIO from st.file_uploader."""
+    df = pd.read_csv(source, skiprows=SKIPROWS, thousands=",")
 
     df["date"] = pd.to_datetime(
         df["date/time"].astype(str).str.replace(r"\s+UTC$", "", regex=True),
@@ -17,7 +16,7 @@ def load_daily() -> pd.DataFrame:
 
     df = df[df["date"].notna() & df["type"].isin(["Order", "Refund"])].copy()
 
-    key = ["date", "Sku"]
+    key     = ["date", "Sku"]
     orders  = df[df["type"] == "Order"]
     refunds = df[df["type"] == "Refund"]
 
@@ -34,13 +33,13 @@ def load_daily() -> pd.DataFrame:
 
     agg_refunds = (
         refunds.groupby(key)
-        .agg(returns=("product sales", "sum"))  # already negative
+        .agg(returns=("product sales", "sum"))
         .reset_index()
     )
 
     result = agg_orders.merge(agg_refunds, on=key, how="left")
     result["returns"]   = result["returns"].fillna(0)
-    result["discounts"] = 0.0  # not separately reported in settlement files
+    result["discounts"] = 0.0
 
     result = result.rename(columns={"Sku": "sku"})
     result["channel"] = CHANNEL

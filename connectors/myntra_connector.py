@@ -1,18 +1,15 @@
-from pathlib import Path
 import pandas as pd
 
 CHANNEL = "Myntra"
-CSV_PATH = Path(__file__).parent.parent / "data" / "myntra_export.csv"
 
 DELIVERED_STATUSES = {"C", "D"}
 RETURN_STATUSES    = {"RTO", "RTF"}
 
 
-def load_daily() -> pd.DataFrame:
-    df = pd.read_csv(CSV_PATH, low_memory=False)
+def load_daily(source) -> pd.DataFrame:
+    """source: a file path, file-like object, or BytesIO from st.file_uploader."""
+    df = pd.read_csv(source, low_memory=False)
 
-    # Myntra exports often lose the date portion of timestamps (CSV formatting
-    # issue). We fall back across multiple columns to find the best date.
     df["_date"] = pd.NaT
     for col in ["return creation date", "rto creation date",
                 "delivered on", "cancelled on", "created on"]:
@@ -38,14 +35,14 @@ def load_daily() -> pd.DataFrame:
         )
         .reset_index()
     )
-    agg_sales["discounts"] = -agg_sales["discounts"]  # make negative to match convention
+    agg_sales["discounts"] = -agg_sales["discounts"]
 
     agg_returns = (
         ret_df.groupby(key)
         .agg(returns=("seller price", "sum"))
         .reset_index()
     )
-    agg_returns["returns"] = -agg_returns["returns"]  # negative = revenue lost
+    agg_returns["returns"] = -agg_returns["returns"]
 
     result = agg_sales.merge(agg_returns, on=key, how="left")
     result["returns"] = result["returns"].fillna(0)

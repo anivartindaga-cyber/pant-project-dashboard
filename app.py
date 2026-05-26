@@ -1,3 +1,4 @@
+import io
 import sys
 from pathlib import Path
 from typing import Optional
@@ -10,9 +11,9 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from connectors.shopify_connector import load_daily as load_shopify
-from connectors.amazon_connector import load_daily as load_amazon
-from connectors.myntra_connector import load_daily as load_myntra
-from connectors.fynd_connector import load_daily as load_fynd
+from connectors.amazon_connector  import load_daily as load_amazon
+from connectors.myntra_connector  import load_daily as load_myntra
+from connectors.fynd_connector    import load_daily as load_fynd
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -22,7 +23,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom styles ──────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 [data-testid="metric-container"] {
@@ -39,7 +39,6 @@ st.markdown("""
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def fmt_inr(value: float) -> str:
-    """Format a number in Indian currency notation (₹ lakhs / crores)."""
     v    = abs(value)
     sign = "-" if value < 0 else ""
     if v >= 1_00_00_000:
@@ -49,56 +48,99 @@ def fmt_inr(value: float) -> str:
     return f"{sign}₹{v:,.0f}"
 
 
-# ── Data loaders (cached) ──────────────────────────────────────────────────────
-@st.cache_data(ttl=3600, show_spinner="Loading sales data…")
-def load_all_channels() -> pd.DataFrame:
+# ── Cached data processing ─────────────────────────────────────────────────────
+@st.cache_data(show_spinner="Processing data…")
+def process_channels(
+    shopify_bytes: bytes,
+    amazon_bytes:  bytes,
+    myntra_bytes:  bytes,
+    fynd_bytes:    bytes,
+) -> pd.DataFrame:
+    loaders = [
+        ("Shopify", load_shopify, shopify_bytes),
+        ("Amazon",  load_amazon,  amazon_bytes),
+        ("Myntra",  load_myntra,  myntra_bytes),
+        ("Fynd",    load_fynd,    fynd_bytes),
+    ]
     dfs = []
-    errors = []
-    for name, loader in [
-        ("Shopify", load_shopify),
-        ("Amazon",  load_amazon),
-        ("Myntra",  load_myntra),
-        ("Fynd",    load_fynd),
-    ]:
+    for name, loader, raw in loaders:
         try:
-            df = loader()
+            df = loader(io.BytesIO(raw))
             dfs.append(df)
-        except FileNotFoundError:
-            errors.append(f"⚠️ **{name}**: CSV not found in `data/`")
         except Exception as exc:
-            errors.append(f"❌ **{name}**: {exc}")
-    if errors:
-        for msg in errors:
-            st.sidebar.warning(msg)
+            st.warning(f"⚠️ Could not process {name}: {exc}")
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False)
-def load_cogs() -> Optional[pd.DataFrame]:
-    path = ROOT / "data" / "cogs.csv"
-    if not path.exists():
-        return None
-    df = pd.read_csv(path)
+def process_cogs(cogs_bytes: bytes) -> Optional[pd.DataFrame]:
+    df = pd.read_csv(io.BytesIO(cogs_bytes))
     df.columns = df.columns.str.lower().str.strip()
     return df[["sku", "cost_price"]]
 
 
-# ── Load raw data ──────────────────────────────────────────────────────────────
-df_raw  = load_all_channels()
-cogs_df = load_cogs()
+# ── Sidebar — file uploaders ───────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## 👖 The Pant Project")
+    st.divider()
+    st.markdown("### Upload Data")
+
+    shopify_file = st.file_uploader("Shopify CSV",  type="csv", key="shopify")
+    amazon_file  = st.file_uploader("Amazon CSV",   type="csv", key="amazon")
+    myntra_file  = st.file_uploader("Myntra CSV",   type="csv", key="myntra")
+    fynd_file    = st.file_uploader("Fynd CSV",     type="csv", key="fynd")
+
+    st.divider()
+    st.markdown("### Gross Margin *(optional)*")
+    cogs_file = st.file_uploader("COGS CSV", type="csv", key="cogs",
+                                  help="CSV with columns: sku, cost_price")
+
+# ── Upload prompt ──────────────────────────────────────────────────────────────
+files_ready = all([shopify_file, amazon_file, myntra_file, fynd_file])
+
+if not files_ready:
+    st.title("👖 The Pant Project — Sales Dashboard")
+    st.markdown("### Upload your CSV files to get started")
+    st.markdown(
+        "Use the **sidebar on the left** to upload your four channel exports. "
+        "Your data is processed in the browser and never stored anywhere."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info("**Required files**\n\n"
+                "📂 Shopify CSV\n\n"
+                "📂 Amazon CSV\n\n"
+                "📂 Myntra CSV\n\n"
+                "📂 Fynd CSV")
+    with col2:
+        st.success("**Optional**\n\n"
+                   "📂 COGS CSV — enables Gross Margin %\n\n"
+                   "Format: two columns\n"
+                   "`sku` and `cost_price`")
+
+    uploaded = sum(f is not None for f in [shopify_file, amazon_file, myntra_file, fynd_file])
+    if uploaded > 0:
+        st.progress(uploaded / 4, text=f"{uploaded} of 4 files uploaded")
+    st.stop()
+
+# ── Process uploaded files ─────────────────────────────────────────────────────
+df_raw = process_channels(
+    shopify_file.read(), amazon_file.read(),
+    myntra_file.read(),  fynd_file.read(),
+)
+
+cogs_df  = process_cogs(cogs_file.read()) if cogs_file else None
+has_cogs = cogs_df is not None
 
 if df_raw.empty:
-    st.error(
-        "No data loaded. Make sure your four CSV files are in the `data/` folder "
-        "of the GitHub repo, then push the changes."
-    )
+    st.error("No data could be loaded. Check that the correct CSV files were uploaded.")
     st.stop()
 
 df_raw["date"] = pd.to_datetime(df_raw["date"])
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+# ── Sidebar — filters (shown after upload) ─────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 👖 The Pant Project")
     st.divider()
     st.markdown("### Filters")
 
@@ -113,16 +155,12 @@ with st.sidebar:
     )
 
     all_channels = sorted(df_raw["channel"].unique())
-    channels = st.multiselect(
-        "Channels",
-        options=all_channels,
-        default=all_channels,
-    )
+    channels = st.multiselect("Channels", options=all_channels, default=all_channels)
 
     st.divider()
     st.caption(f"Data: {min_d.strftime('%d %b %Y')} → {max_d.strftime('%d %b %Y')}")
-    if cogs_df is None:
-        st.info("💡 Add `data/cogs.csv` to unlock **Gross Margin %** metrics.")
+    if not has_cogs:
+        st.info("💡 Upload `cogs.csv` above to unlock **Gross Margin %**")
 
 # ── Apply filters ──────────────────────────────────────────────────────────────
 if len(date_range) == 2:
@@ -136,11 +174,10 @@ else:
     df = df_raw[df_raw["channel"].isin(channels)].copy()
 
 if df.empty:
-    st.warning("No data for the selected filters. Try widening the date range or selecting more channels.")
+    st.warning("No data for the selected filters.")
     st.stop()
 
 # ── Merge COGS ─────────────────────────────────────────────────────────────────
-has_cogs = cogs_df is not None
 if has_cogs:
     df = df.merge(cogs_df, on="sku", how="left")
     df["total_cogs"] = df["units_sold"] * df["cost_price"].fillna(0)
@@ -150,8 +187,7 @@ else:
 # ── KPI calculations ───────────────────────────────────────────────────────────
 gross_rev    = df["gross_sales"].sum()
 net_rev      = df["net_sales"].sum()
-total_cogs   = df["total_cogs"].sum()
-gross_profit = net_rev - total_cogs
+gross_profit = net_rev - df["total_cogs"].sum()
 gm_pct       = gross_profit / net_rev * 100 if net_rev else 0
 units        = int(df["units_sold"].sum())
 total_ret    = abs(df["returns"].sum())
@@ -173,16 +209,16 @@ st.markdown("#### Revenue & Margin")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Gross Revenue",  fmt_inr(gross_rev))
 c2.metric("Net Revenue",    fmt_inr(net_rev))
-c3.metric("Gross Margin %", f"{gm_pct:.1f}%" if has_cogs else "—  (needs cogs.csv)")
+c3.metric("Gross Margin %", f"{gm_pct:.1f}%" if has_cogs else "— upload cogs.csv")
 c4.metric("Units Sold",     f"{units:,}")
 
 # ── KPI row 2 ──────────────────────────────────────────────────────────────────
 st.markdown("#### Deductions & Orders")
 c5, c6, c7, c8 = st.columns(4)
-c5.metric("Total Discounts",  fmt_inr(total_disc))
-c6.metric("Total Returns",    fmt_inr(total_ret))
-c7.metric("Return Rate",      f"{return_rate:.1f}%")
-c8.metric("Avg Order Value",  fmt_inr(aov))
+c5.metric("Total Discounts", fmt_inr(total_disc))
+c6.metric("Total Returns",   fmt_inr(total_ret))
+c7.metric("Return Rate",     f"{return_rate:.1f}%")
+c8.metric("Avg Order Value", fmt_inr(aov))
 
 st.divider()
 
@@ -192,7 +228,7 @@ col_l, col_r = st.columns([3, 2])
 with col_l:
     daily_ch = (
         df.groupby(["date", "channel"])
-        .agg(net_sales=("net_sales", "sum"), gross_sales=("gross_sales", "sum"))
+        .agg(net_sales=("net_sales", "sum"))
         .reset_index()
     )
     fig_trend = px.line(
@@ -206,12 +242,11 @@ with col_l:
     st.plotly_chart(fig_trend, use_container_width=True)
 
 with col_r:
-    ch_rev = df.groupby("channel")["net_sales"].sum().reset_index()
+    ch_rev  = df.groupby("channel")["net_sales"].sum().reset_index()
     fig_pie = px.pie(
         ch_rev, values="net_sales", names="channel",
         title="Net Revenue Split by Channel",
-        hole=0.45,
-        template="plotly_white",
+        hole=0.45, template="plotly_white",
     )
     fig_pie.update_traces(textposition="outside", textinfo="percent+label")
     fig_pie.update_layout(showlegend=False)
@@ -221,13 +256,12 @@ with col_r:
 col_a, col_b = st.columns(2)
 
 with col_a:
-    ch_units = df.groupby("channel")["units_sold"].sum().reset_index()
+    ch_units  = df.groupby("channel")["units_sold"].sum().reset_index()
     fig_units = px.bar(
         ch_units, x="channel", y="units_sold", color="channel",
         title="Units Sold by Channel",
         labels={"units_sold": "Units Sold", "channel": "Channel"},
-        template="plotly_white",
-        text="units_sold",
+        template="plotly_white", text="units_sold",
     )
     fig_units.update_traces(textposition="outside")
     fig_units.update_layout(showlegend=False)
@@ -253,9 +287,7 @@ with col_b:
         st.plotly_chart(fig_gm, use_container_width=True)
     else:
         ret_ch = df.groupby("channel")[["gross_sales", "returns"]].sum().reset_index()
-        ret_ch["return_rate"] = (
-            abs(ret_ch["returns"]) / ret_ch["gross_sales"] * 100
-        ).round(1)
+        ret_ch["return_rate"] = (abs(ret_ch["returns"]) / ret_ch["gross_sales"] * 100).round(1)
         fig_ret = px.bar(
             ret_ch, x="channel", y="return_rate", color="channel",
             title="Return Rate % by Channel",
@@ -275,18 +307,14 @@ tab_rev, tab_units = st.tabs(["By Net Revenue", "By Units Sold"])
 
 with tab_rev:
     top_rev = (
-        df.groupby("sku")
-        .agg(net_sales=("net_sales", "sum"), units=("units_sold", "sum"))
-        .reset_index()
-        .sort_values("net_sales", ascending=True)
-        .tail(20)
+        df.groupby("sku")["net_sales"].sum()
+        .reset_index().sort_values("net_sales", ascending=True).tail(20)
     )
     fig_skurev = px.bar(
         top_rev, x="net_sales", y="sku", orientation="h",
         title="Top 20 SKUs — Net Revenue",
         labels={"net_sales": "Net Revenue (₹)", "sku": "SKU"},
-        template="plotly_white",
-        color="net_sales",
+        template="plotly_white", color="net_sales",
         color_continuous_scale="Blues",
     )
     fig_skurev.update_layout(coloraxis_showscale=False, height=580)
@@ -294,18 +322,14 @@ with tab_rev:
 
 with tab_units:
     top_units = (
-        df.groupby("sku")["units_sold"]
-        .sum()
-        .reset_index()
-        .sort_values("units_sold", ascending=True)
-        .tail(20)
+        df.groupby("sku")["units_sold"].sum()
+        .reset_index().sort_values("units_sold", ascending=True).tail(20)
     )
     fig_skuunits = px.bar(
         top_units, x="units_sold", y="sku", orientation="h",
         title="Top 20 SKUs — Units Sold",
         labels={"units_sold": "Units Sold", "sku": "SKU"},
-        template="plotly_white",
-        color="units_sold",
+        template="plotly_white", color="units_sold",
         color_continuous_scale="Greens",
     )
     fig_skuunits.update_layout(coloraxis_showscale=False, height=580)
@@ -317,10 +341,9 @@ st.divider()
 with st.expander("📋 View & Download Raw Data"):
     display_df = df.drop(columns=["total_cogs", "cost_price"], errors="ignore")
     st.dataframe(display_df, use_container_width=True, hide_index=True)
-    csv_bytes = display_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇ Download filtered data as CSV",
-        data=csv_bytes,
+        data=display_df.to_csv(index=False).encode("utf-8"),
         file_name="pant_project_sales_filtered.csv",
         mime="text/csv",
     )
