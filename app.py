@@ -324,51 +324,59 @@ def _base_style(sku: str) -> str:
 def compute_fifo_cogs(sales_df: pd.DataFrame, purchases_df: pd.DataFrame) -> pd.Series:
     """
     FIFO costing: consume oldest purchase batches first as sales occur.
-    Matches purchases to sales by exact SKU, then falls back to base style code.
-    Returns a Series of total_cogs aligned to sales_df.index.
+    Optimised: vectorised style-key computation, itertuples, pre-built last_cost dict.
     """
     from collections import deque
 
-    # Build per-style queues ordered oldest-first (each entry: [qty_left, unit_cost])
-    queues: dict = {}
-    for _, row in purchases_df.sort_values("date").iterrows():
-        key = _base_style(str(row["sku"]))
-        if key not in queues:
-            queues[key] = deque()
-        queues[key].append([float(row["quantity"]), float(row["cost_price"])])
+    _SIZE_RE = r'[-_](\d{2,3}|XXXL|XXL|XL|XS|[LMSX])$'
 
-    cogs_map: dict = {}
-    for idx, row in sales_df.sort_values("date").iterrows():
-        raw_sku    = str(row["sku"]).strip()
-        style      = _base_style(raw_sku)
-        remaining  = max(0.0, float(row.get("units_sold", 0)))
-        cogs       = 0.0
+    # Vectorised style-key stripping (much faster than per-row apply)
+    pur = purchases_df.copy()
+    pur["sk"] = pur["sku"].astype(str).str.strip().str.replace(_SIZE_RE, '', regex=True)
+    pur = pur.sort_values("date")
 
-        q = queues.get(raw_sku) or queues.get(style)
+    queues:    dict = {}
+    last_cost: dict = {}          # fallback cost when stock runs out
+    for row in pur.itertuples(index=False):
+        sk = row.sk
+        if sk not in queues:
+            queues[sk] = deque()
+        queues[sk].append([float(row.quantity), float(row.cost_price)])
+        last_cost[sk] = float(row.cost_price)
+
+    sal = sales_df.copy()
+    sal["sk"] = sal["sku"].astype(str).str.strip().str.replace(_SIZE_RE, '', regex=True)
+    sal = sal.sort_values("date")
+
+    result: dict = {}
+    for row in sal.itertuples():
+        sk        = row.sk
+        remaining = max(0.0, float(row.units_sold))
+        cogs      = 0.0
+
+        q = queues.get(sk)
         if q:
             while remaining > 0 and q:
-                batch = q[0]
-                take  = min(remaining, batch[0])
-                cogs      += take * batch[1]
+                batch     = q[0]
+                take      = min(remaining, batch[0])
+                cogs     += take * batch[1]
                 remaining -= take
                 batch[0]  -= take
                 if batch[0] == 0:
                     q.popleft()
 
-        # Units sold beyond available inventory — use most recent purchase cost
         if remaining > 0:
-            mask = (
-                purchases_df["sku"].astype(str).str.strip() == raw_sku
-            ) | (
-                purchases_df["sku"].apply(lambda x: _base_style(str(x))) == style
-            )
-            sku_pur = purchases_df[mask]
-            if not sku_pur.empty:
-                cogs += remaining * float(sku_pur.sort_values("date").iloc[-1]["cost_price"])
+            cogs += remaining * last_cost.get(sk, 0.0)
 
-        cogs_map[idx] = cogs
+        result[row.Index] = cogs
 
-    return pd.Series(cogs_map, dtype=float).reindex(sales_df.index).fillna(0.0)
+    return pd.Series(result, dtype=float).reindex(sales_df.index).fillna(0.0)
+
+
+@st.cache_data(show_spinner="Calculating FIFO costs…")
+def _cached_fifo(sales_df: pd.DataFrame, purchases_df: pd.DataFrame) -> pd.Series:
+    """Cached wrapper so FIFO only reruns when data actually changes."""
+    return compute_fifo_cogs(sales_df, purchases_df)
 
 
 @st.cache_data(show_spinner=False)
@@ -476,8 +484,7 @@ df_raw["channel"] = df_raw["channel"].replace({
 # ── Compute COGS on full dataset (FIFO needs all history before filtering) ──
 if has_cogs:
     if cogs_mode == "fifo":
-        with st.spinner("Calculating FIFO costs…"):
-            df_raw["total_cogs"] = compute_fifo_cogs(df_raw, cogs_df)
+        df_raw["total_cogs"] = _cached_fifo(df_raw, cogs_df)
     else:
         df_raw = df_raw.merge(cogs_df, on="sku", how="left")
         no_match = df_raw["cost_price"].isna()
