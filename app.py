@@ -535,9 +535,14 @@ with st.sidebar:
     min_d = df_raw["date"].min().date()
     max_d = df_raw["date"].max().date()
 
+    # Default start = latest first-date across all channels so they align
+    common_start = (
+        df_raw.groupby("channel")["date"].min().dt.date.max()
+    )
+
     date_range = st.date_input(
         "Date range",
-        value=(min_d, max_d),
+        value=(common_start, max_d),
         min_value=min_d,
         max_value=max_d,
     )
