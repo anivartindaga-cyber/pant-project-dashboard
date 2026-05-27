@@ -321,7 +321,11 @@ def _base_style(sku: str) -> str:
     return re.sub(r'[-_](\d{2,3}|XXL|XL|XS|XXXL|[LMSX])$', '', str(sku).strip())
 
 
-def compute_fifo_cogs(sales_df: pd.DataFrame, purchases_df: pd.DataFrame) -> pd.Series:
+def compute_fifo_cogs(
+    sales_df: pd.DataFrame,
+    purchases_df: pd.DataFrame,
+    fallback: Optional[dict] = None,   # {style_key: cost_price} for unmatched SKUs
+) -> pd.Series:
     """
     FIFO costing: consume oldest purchase batches first as sales occur.
     Optimised: vectorised style-key computation, itertuples, pre-built last_cost dict.
@@ -366,7 +370,9 @@ def compute_fifo_cogs(sales_df: pd.DataFrame, purchases_df: pd.DataFrame) -> pd.
                     q.popleft()
 
         if remaining > 0:
-            cogs += remaining * last_cost.get(sk, 0.0)
+            # Priority: last FIFO batch cost → flat-rate fallback → 0
+            fb = last_cost.get(sk) or (fallback.get(sk) if fallback else None) or 0.0
+            cogs += remaining * fb
 
         result[row.Index] = cogs
 
@@ -374,9 +380,20 @@ def compute_fifo_cogs(sales_df: pd.DataFrame, purchases_df: pd.DataFrame) -> pd.
 
 
 @st.cache_data(show_spinner="Calculating FIFO costs…")
-def _cached_fifo(sales_df: pd.DataFrame, purchases_df: pd.DataFrame) -> pd.Series:
+def _cached_fifo(
+    sales_df: pd.DataFrame,
+    purchases_df: pd.DataFrame,
+    fallback_df: Optional[pd.DataFrame],
+) -> pd.Series:
     """Cached wrapper so FIFO only reruns when data actually changes."""
-    return compute_fifo_cogs(sales_df, purchases_df)
+    fb = None
+    if fallback_df is not None:
+        _SIZE_RE = r'[-_](\d{2,3}|XXXL|XXL|XL|XS|[LMSX])$'
+        fb = dict(zip(
+            fallback_df["sku"].astype(str).str.strip().str.replace(_SIZE_RE, '', regex=True),
+            pd.to_numeric(fallback_df["cost_price"], errors="coerce").fillna(0),
+        ))
+    return compute_fifo_cogs(sales_df, purchases_df, fallback=fb)
 
 
 @st.cache_data(show_spinner=False)
@@ -422,6 +439,9 @@ with st.sidebar:
                                       "FIFO mode — columns: date, sku, quantity, cost_price\n"
                                       "Flat mode  — columns: sku, cost_price"
                                   ))
+    fallback_file = st.file_uploader("Cost Fallback CSV *(optional)*", type="csv",
+                                      key="fallback",
+                                      help="sku, cost_price — used for SKUs missing from the purchases file")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UPLOAD PROMPT
@@ -464,7 +484,8 @@ df_raw = process_channels(
     myntra_file.read(),  fynd_file.read(),
 )
 
-_cogs_result = process_cogs(cogs_file.read()) if cogs_file else None
+_cogs_result  = process_cogs(cogs_file.read()) if cogs_file else None
+_fallback_df  = process_cogs(fallback_file.read())[1] if fallback_file else None
 has_cogs     = _cogs_result is not None
 cogs_mode    = _cogs_result[0] if has_cogs else None
 cogs_df      = _cogs_result[1] if has_cogs else None
@@ -484,7 +505,7 @@ df_raw["channel"] = df_raw["channel"].replace({
 # ── Compute COGS on full dataset (FIFO needs all history before filtering) ──
 if has_cogs:
     if cogs_mode == "fifo":
-        df_raw["total_cogs"] = _cached_fifo(df_raw, cogs_df)
+        df_raw["total_cogs"] = _cached_fifo(df_raw, cogs_df, _fallback_df)
     else:
         df_raw = df_raw.merge(cogs_df, on="sku", how="left")
         no_match = df_raw["cost_price"].isna()
