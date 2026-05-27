@@ -741,8 +741,10 @@ with tab_gm:
             .reset_index()
         )
         sku_gm = sku_gm[(sku_gm["net_sales"] > 0) & (sku_gm["total_cogs"] > 0)].copy()
-        sku_gm["gross_profit"] = sku_gm["net_sales"] - sku_gm["total_cogs"]
-        sku_gm["gm_pct"]       = (sku_gm["gross_profit"] / sku_gm["net_sales"] * 100).round(1)
+        sku_gm["gross_profit"]   = sku_gm["net_sales"] - sku_gm["total_cogs"]
+        sku_gm["gm_pct"]         = (sku_gm["gross_profit"] / sku_gm["net_sales"] * 100).round(1)
+        sku_gm["avg_price_unit"] = (sku_gm["net_sales"]  / sku_gm["units_sold"]).round(0)
+        sku_gm["avg_cost_unit"]  = (sku_gm["total_cogs"] / sku_gm["units_sold"]).round(0)
 
         # Chart — top 20 by net revenue, coloured by GM%
         chart_df = sku_gm.sort_values("net_sales", ascending=True).tail(20)
@@ -765,19 +767,23 @@ with tab_gm:
             sku_gm
             .sort_values("gm_pct", ascending=False)
             .rename(columns={
-                "sku":          "SKU",
-                "units_sold":   "Units Sold",
-                "net_sales":    "Net Revenue (₹)",
-                "total_cogs":   "COGS (₹)",
-                "gross_profit": "Gross Profit (₹)",
-                "gm_pct":       "GM %",
+                "sku":             "SKU",
+                "units_sold":      "Units Sold",
+                "net_sales":       "Net Revenue (₹)",
+                "total_cogs":      "COGS (₹)",
+                "gross_profit":    "Gross Profit (₹)",
+                "gm_pct":          "GM %",
+                "avg_price_unit":  "Avg Price/Unit (₹)",
+                "avg_cost_unit":   "Avg Cost/Unit (₹)",
             })
             .reset_index(drop=True)
         )
-        tbl["Net Revenue (₹)"] = tbl["Net Revenue (₹)"].apply(fmt_inr)
-        tbl["COGS (₹)"]        = tbl["COGS (₹)"].apply(fmt_inr)
-        tbl["Gross Profit (₹)"]= tbl["Gross Profit (₹)"].apply(fmt_inr)
-        tbl["GM %"]            = tbl["GM %"].astype(str) + "%"
+        tbl["Net Revenue (₹)"]    = tbl["Net Revenue (₹)"].apply(fmt_inr)
+        tbl["COGS (₹)"]           = tbl["COGS (₹)"].apply(fmt_inr)
+        tbl["Gross Profit (₹)"]   = tbl["Gross Profit (₹)"].apply(fmt_inr)
+        tbl["GM %"]               = tbl["GM %"].astype(str) + "%"
+        tbl["Avg Price/Unit (₹)"] = tbl["Avg Price/Unit (₹)"].apply(lambda x: f"₹{x:,.0f}")
+        tbl["Avg Cost/Unit (₹)"]  = tbl["Avg Cost/Unit (₹)"].apply(lambda x: f"₹{x:,.0f}")
         st.dataframe(tbl, use_container_width=True, hide_index=True)
 
         st.download_button(
