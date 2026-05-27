@@ -694,7 +694,8 @@ st.divider()
 
 # ── Top SKUs ──────────────────────────────────────────────────────────────────
 st.markdown("#### Top SKUs")
-tab_rev, tab_units = st.tabs(["By Net Revenue", "By Units Sold"])
+_gm_tab_label = "By Gross Margin %" if has_cogs else "By Gross Margin % *(upload COGS to unlock)*"
+tab_rev, tab_units, tab_gm = st.tabs(["By Net Revenue", "By Units Sold", _gm_tab_label])
 
 with tab_rev:
     top_rev = (
@@ -725,6 +726,66 @@ with tab_units:
     )
     fig_skuunits.update_layout(coloraxis_showscale=False, height=580)
     st.plotly_chart(fig_skuunits, use_container_width=True)
+
+with tab_gm:
+    if not has_cogs:
+        st.info("Upload a Purchases / COGS CSV to see SKU-level Gross Margin %.")
+    else:
+        sku_gm = (
+            df.groupby("sku")
+            .agg(
+                units_sold  =("units_sold",  "sum"),
+                net_sales   =("net_sales",   "sum"),
+                total_cogs  =("total_cogs",  "sum"),
+            )
+            .reset_index()
+        )
+        sku_gm = sku_gm[sku_gm["net_sales"] > 0].copy()
+        sku_gm["gross_profit"] = sku_gm["net_sales"] - sku_gm["total_cogs"]
+        sku_gm["gm_pct"]       = (sku_gm["gross_profit"] / sku_gm["net_sales"] * 100).round(1)
+
+        # Chart — top 20 by net revenue, coloured by GM%
+        chart_df = sku_gm.sort_values("net_sales", ascending=True).tail(20)
+        fig_gm_sku = px.bar(
+            chart_df, x="gm_pct", y="sku", orientation="h",
+            title="Top 20 SKUs (by Revenue) — Gross Margin %",
+            labels={"gm_pct": "Gross Margin %", "sku": "SKU"},
+            template="plotly_white", color="gm_pct",
+            color_continuous_scale="RdYlGn",
+            range_color=[0, 100],
+            text=chart_df["gm_pct"].astype(str) + "%",
+        )
+        fig_gm_sku.update_traces(textposition="outside")
+        fig_gm_sku.update_layout(coloraxis_showscale=False, height=580)
+        st.plotly_chart(fig_gm_sku, use_container_width=True)
+
+        # Full table
+        st.markdown("**All SKUs — GM% breakdown**")
+        tbl = (
+            sku_gm
+            .sort_values("gm_pct", ascending=False)
+            .rename(columns={
+                "sku":          "SKU",
+                "units_sold":   "Units Sold",
+                "net_sales":    "Net Revenue (₹)",
+                "total_cogs":   "COGS (₹)",
+                "gross_profit": "Gross Profit (₹)",
+                "gm_pct":       "GM %",
+            })
+            .reset_index(drop=True)
+        )
+        tbl["Net Revenue (₹)"] = tbl["Net Revenue (₹)"].apply(fmt_inr)
+        tbl["COGS (₹)"]        = tbl["COGS (₹)"].apply(fmt_inr)
+        tbl["Gross Profit (₹)"]= tbl["Gross Profit (₹)"].apply(fmt_inr)
+        tbl["GM %"]            = tbl["GM %"].astype(str) + "%"
+        st.dataframe(tbl, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "⬇ Download SKU GM% as CSV",
+            data=sku_gm.sort_values("gm_pct", ascending=False).to_csv(index=False).encode("utf-8"),
+            file_name="sku_gm_breakdown.csv",
+            mime="text/csv",
+        )
 
 st.divider()
 
