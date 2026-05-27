@@ -740,7 +740,7 @@ with tab_gm:
             )
             .reset_index()
         )
-        sku_gm = sku_gm[sku_gm["net_sales"] > 0].copy()
+        sku_gm = sku_gm[(sku_gm["net_sales"] > 0) & (sku_gm["total_cogs"] > 0)].copy()
         sku_gm["gross_profit"] = sku_gm["net_sales"] - sku_gm["total_cogs"]
         sku_gm["gm_pct"]       = (sku_gm["gross_profit"] / sku_gm["net_sales"] * 100).round(1)
 
