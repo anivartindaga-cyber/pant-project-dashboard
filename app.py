@@ -148,14 +148,17 @@ _MYNTRA_RETURNS   = {"RTO", "RTF"}
 def load_myntra(source) -> pd.DataFrame:
     df = _read_csv_generic(source, low_memory=False)
 
-    df["_date"] = pd.NaT
-    for col in ["return creation date", "rto creation date",
-                "delivered on", "cancelled on", "created on"]:
-        if col in df.columns:
-            df["_date"] = df["_date"].combine_first(
-                pd.to_datetime(df[col], errors="coerce")
-            )
-    df["date"] = df["_date"].dt.normalize()
+    # Use order placement date ("created on") to match other channels.
+    # Fall back through alternatives if the column is missing.
+    date_col = next(
+        (c for c in ["created on", "cancelled on", "delivered on",
+                     "rto creation date", "return creation date"]
+         if c in df.columns),
+        None,
+    )
+    if date_col is None:
+        raise ValueError("Myntra CSV: could not find a date column.")
+    df["date"] = pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
 
     key      = ["date", "seller sku code"]
     sales_df = df[df["order status"].isin(_MYNTRA_DELIVERED)].copy()
