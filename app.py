@@ -321,15 +321,76 @@ def _base_style(sku: str) -> str:
     return re.sub(r'[-_](\d{2,3}|XXL|XL|XS|XXXL|[LMSX])$', '', str(sku).strip())
 
 
+def compute_fifo_cogs(sales_df: pd.DataFrame, purchases_df: pd.DataFrame) -> pd.Series:
+    """
+    FIFO costing: consume oldest purchase batches first as sales occur.
+    Matches purchases to sales by exact SKU, then falls back to base style code.
+    Returns a Series of total_cogs aligned to sales_df.index.
+    """
+    from collections import deque
+
+    # Build per-style queues ordered oldest-first (each entry: [qty_left, unit_cost])
+    queues: dict = {}
+    for _, row in purchases_df.sort_values("date").iterrows():
+        key = _base_style(str(row["sku"]))
+        if key not in queues:
+            queues[key] = deque()
+        queues[key].append([float(row["quantity"]), float(row["cost_price"])])
+
+    cogs_map: dict = {}
+    for idx, row in sales_df.sort_values("date").iterrows():
+        raw_sku    = str(row["sku"]).strip()
+        style      = _base_style(raw_sku)
+        remaining  = max(0.0, float(row.get("units_sold", 0)))
+        cogs       = 0.0
+
+        q = queues.get(raw_sku) or queues.get(style)
+        if q:
+            while remaining > 0 and q:
+                batch = q[0]
+                take  = min(remaining, batch[0])
+                cogs      += take * batch[1]
+                remaining -= take
+                batch[0]  -= take
+                if batch[0] == 0:
+                    q.popleft()
+
+        # Units sold beyond available inventory — use most recent purchase cost
+        if remaining > 0:
+            mask = (
+                purchases_df["sku"].astype(str).str.strip() == raw_sku
+            ) | (
+                purchases_df["sku"].apply(lambda x: _base_style(str(x))) == style
+            )
+            sku_pur = purchases_df[mask]
+            if not sku_pur.empty:
+                cogs += remaining * float(sku_pur.sort_values("date").iloc[-1]["cost_price"])
+
+        cogs_map[idx] = cogs
+
+    return pd.Series(cogs_map, dtype=float).reindex(sales_df.index).fillna(0.0)
+
+
 @st.cache_data(show_spinner=False)
-def process_cogs(cogs_bytes: bytes) -> Optional[pd.DataFrame]:
+def process_cogs(cogs_bytes: bytes):
+    """
+    Returns (mode, df) where mode is 'fifo' or 'flat'.
+    FIFO mode: CSV has columns date, sku, quantity, cost_price.
+    Flat mode: CSV has columns sku, cost_price (one row per style).
+    """
     df = pd.read_csv(io.BytesIO(cogs_bytes))
     df.columns = df.columns.str.lower().str.strip()
-    if "style_code" in df.columns:
-        df = df.rename(columns={"style_code": "sku"})
-    df = df[["sku", "cost_price"]].copy()
-    df["cost_price"] = pd.to_numeric(df["cost_price"], errors="coerce")
-    return df
+
+    if "date" in df.columns and "quantity" in df.columns:
+        df["date"]       = pd.to_datetime(df["date"], errors="coerce")
+        df["quantity"]   = pd.to_numeric(df["quantity"],   errors="coerce").fillna(0)
+        df["cost_price"] = pd.to_numeric(df["cost_price"], errors="coerce").fillna(0)
+        return ("fifo", df[["date", "sku", "quantity", "cost_price"]])
+    else:
+        if "style_code" in df.columns:
+            df = df.rename(columns={"style_code": "sku"})
+        df["cost_price"] = pd.to_numeric(df["cost_price"], errors="coerce")
+        return ("flat", df[["sku", "cost_price"]])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -348,8 +409,11 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### Gross Margin *(optional)*")
-    cogs_file = st.file_uploader("COGS CSV", type="csv", key="cogs",
-                                  help="CSV with columns: sku, cost_price")
+    cogs_file = st.file_uploader("Purchases / COGS CSV", type="csv", key="cogs",
+                                  help=(
+                                      "FIFO mode — columns: date, sku, quantity, cost_price\n"
+                                      "Flat mode  — columns: sku, cost_price"
+                                  ))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # UPLOAD PROMPT
@@ -374,9 +438,9 @@ if not files_ready:
                 "\U0001f4c2 Retail CSV")
     with col2:
         st.success("**Optional**\n\n"
-                   "\U0001f4c2 COGS CSV — enables Gross Margin %\n\n"
-                   "Format: two columns\n"
-                   "`sku` and `cost_price`")
+                   "\U0001f4c2 Purchases CSV — enables Gross Margin %\n\n"
+                   "**FIFO:** `date, sku, quantity, cost_price`\n\n"
+                   "**Flat:** `sku, cost_price`")
 
     uploaded = sum(f is not None for f in [shopify_file, amazon_file, myntra_file, fynd_file])
     if uploaded > 0:
@@ -392,8 +456,10 @@ df_raw = process_channels(
     myntra_file.read(),  fynd_file.read(),
 )
 
-cogs_df  = process_cogs(cogs_file.read()) if cogs_file else None
-has_cogs = cogs_df is not None
+_cogs_result = process_cogs(cogs_file.read()) if cogs_file else None
+has_cogs     = _cogs_result is not None
+cogs_mode    = _cogs_result[0] if has_cogs else None
+cogs_df      = _cogs_result[1] if has_cogs else None
 
 if df_raw.empty:
     st.error("No data could be loaded. Check that the correct CSV files were uploaded.")
@@ -406,6 +472,26 @@ df_raw["channel"] = df_raw["channel"].replace({
     "Shopify": "TPP Website",
     "Fynd":    "Retail",
 })
+
+# ── Compute COGS on full dataset (FIFO needs all history before filtering) ──
+if has_cogs:
+    if cogs_mode == "fifo":
+        with st.spinner("Calculating FIFO costs…"):
+            df_raw["total_cogs"] = compute_fifo_cogs(df_raw, cogs_df)
+    else:
+        df_raw = df_raw.merge(cogs_df, on="sku", how="left")
+        no_match = df_raw["cost_price"].isna()
+        if no_match.any():
+            style_map = dict(zip(
+                cogs_df["sku"].apply(_base_style),
+                cogs_df["cost_price"]
+            ))
+            df_raw.loc[no_match, "cost_price"] = (
+                df_raw.loc[no_match, "sku"].apply(_base_style).map(style_map)
+            )
+        df_raw["total_cogs"] = df_raw["units_sold"] * df_raw["cost_price"].fillna(0)
+else:
+    df_raw["total_cogs"] = 0.0
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR — FILTERS
@@ -431,7 +517,7 @@ with st.sidebar:
     st.divider()
     st.caption(f"Data: {min_d.strftime('%d %b %Y')} → {max_d.strftime('%d %b %Y')}")
     if not has_cogs:
-        st.info("\U0001f4a1 Upload `cogs.csv` above to unlock **Gross Margin %**")
+        st.info("\U0001f4a1 Upload a purchases CSV above to unlock **Gross Margin %**")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # APPLY FILTERS
@@ -450,29 +536,6 @@ else:
 if df.empty:
     st.warning("No data for the selected filters.")
     st.stop()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MERGE COGS
-# ══════════════════════════════════════════════════════════════════════════════
-
-if has_cogs:
-    # 1) Exact SKU match
-    df = df.merge(cogs_df, on="sku", how="left")
-
-    # 2) For unmatched rows, try style-code match (strip size suffix)
-    no_match = df["cost_price"].isna()
-    if no_match.any():
-        style_map = dict(zip(
-            cogs_df["sku"].apply(_base_style),
-            cogs_df["cost_price"]
-        ))
-        df.loc[no_match, "cost_price"] = (
-            df.loc[no_match, "sku"].apply(_base_style).map(style_map)
-        )
-
-    df["total_cogs"] = df["units_sold"] * df["cost_price"].fillna(0)
-else:
-    df["total_cogs"] = 0.0
 
 # ══════════════════════════════════════════════════════════════════════════════
 # KPI CALCULATIONS
