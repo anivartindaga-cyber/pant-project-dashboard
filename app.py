@@ -50,12 +50,16 @@ def _read_csv_generic(source, **kwargs) -> pd.DataFrame:
 
 # ── Shopify ───────────────────────────────────────────────────────────────────
 def _read_shopify_source(source) -> pd.DataFrame:
-    """Accepts both CSV (raw Shopify export) and Excel (GM D2C Working format)."""
-    if hasattr(source, "name") and source.name.lower().endswith(".xlsx"):
+    """Accepts both CSV (raw Shopify export) and Excel (GM D2C Working format).
+    Detects Excel by magic bytes (xlsx = zip, starts with PK\\x03\\x04)."""
+    if hasattr(source, "read"):
         raw = source.read()
-        df  = pd.read_excel(io.BytesIO(raw))
-        return _clean_cols(df)
-    return _read_csv_generic(source)
+    else:
+        raw = source
+    if isinstance(raw, bytes) and raw[:4] == b'PK\x03\x04':
+        return _clean_cols(pd.read_excel(io.BytesIO(raw)))
+    text = raw.decode("utf-8-sig", errors="replace") if isinstance(raw, bytes) else raw
+    return _clean_cols(pd.read_csv(io.StringIO(text)))
 
 
 def load_shopify(source) -> pd.DataFrame:
