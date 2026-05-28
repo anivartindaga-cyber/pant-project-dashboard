@@ -51,7 +51,7 @@ def _read_csv_generic(source, **kwargs) -> pd.DataFrame:
 # ── Shopify ───────────────────────────────────────────────────────────────────
 def load_shopify(source) -> pd.DataFrame:
     df = _read_csv_generic(source)
-    df["date"] = pd.to_datetime(df["Day"], format="%m/%d/%Y")
+    df["date"] = pd.to_datetime(df["Day"], infer_datetime_format=True, errors="coerce")
     result = (
         df.groupby(["date", "Product variant SKU"])
         .agg(
