@@ -505,6 +505,10 @@ df_raw["channel"] = df_raw["channel"].replace({
     "Fynd":    "Retail",
 })
 
+# Aggregate size variants → base style  (PVR187-32 → PVR187)
+_SIZE_RE_STRIP = r'[-_](\d{2,3}|XXXL|XXL|XL|XS|[LMSX])$'
+df_raw["sku"] = df_raw["sku"].astype(str).str.strip().str.replace(_SIZE_RE_STRIP, '', regex=True)
+
 # ── Compute COGS on full dataset (FIFO needs all history before filtering) ──
 if has_cogs:
     if cogs_mode == "fifo":
