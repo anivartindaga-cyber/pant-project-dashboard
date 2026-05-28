@@ -49,9 +49,18 @@ def _read_csv_generic(source, **kwargs) -> pd.DataFrame:
 
 
 # ── Shopify ───────────────────────────────────────────────────────────────────
+def _read_shopify_source(source) -> pd.DataFrame:
+    """Accepts both CSV (raw Shopify export) and Excel (GM D2C Working format)."""
+    if hasattr(source, "name") and source.name.lower().endswith(".xlsx"):
+        raw = source.read()
+        df  = pd.read_excel(io.BytesIO(raw))
+        return _clean_cols(df)
+    return _read_csv_generic(source)
+
+
 def load_shopify(source) -> pd.DataFrame:
-    df = _read_csv_generic(source)
-    df["date"] = pd.to_datetime(df["Day"], infer_datetime_format=True, errors="coerce")
+    df = _read_shopify_source(source)
+    df["date"] = pd.to_datetime(df["Day"], errors="coerce")
     result = (
         df.groupby(["date", "Product variant SKU"])
         .agg(
@@ -430,7 +439,7 @@ with st.sidebar:
     st.divider()
     st.markdown("### Upload Data")
 
-    shopify_file = st.file_uploader("TPP Website CSV", type="csv", key="shopify")
+    shopify_file = st.file_uploader("TPP Website CSV / Excel", type=["csv","xlsx"], key="shopify")
     amazon_file  = st.file_uploader("Amazon CSV",      type="csv", key="amazon")
     myntra_file  = st.file_uploader("Myntra CSV",      type="csv", key="myntra")
     fynd_file    = st.file_uploader("Retail CSV",      type="csv", key="fynd")
